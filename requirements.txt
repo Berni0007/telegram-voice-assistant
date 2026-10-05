@@ -1,0 +1,6 @@
+python-telegram-bot>=21,<23
+python-dotenv>=1,<2
+nvidia-riva-client
+grpcio
+imageio-ffmpeg>=0.6,<1
+openai>=1,<3
