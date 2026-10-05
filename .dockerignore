@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.venv
+venv
+__pycache__
+*.pyc
+bot_memory.db*
+data/*.db*
+*.wav
+*.ogg
+*.log
