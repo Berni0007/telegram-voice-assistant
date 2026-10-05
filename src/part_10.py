@@ -7,6 +7,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("memory", memory_command))
     app.add_handler(CommandHandler("forget", forget_command))
     app.add_handler(CommandHandler("voices", voices))
+    app.add_handler(CommandHandler("diag", diag_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(
         MessageHandler(filters.VOICE, voice_message)
