@@ -9,14 +9,12 @@ def run_host_diagnostics() -> str:
     lines.append(f"NVIDIA_API_KEY: {'SET' if key else 'MISSING'}")
     lines.append(f"BOT_MEMORY_DB: {os.getenv('BOT_MEMORY_DB', '(default)')}")
 
-    # Check the actual public egress IP used by this container.
     try:
         r = httpx.get("https://api.ipify.org?format=json", timeout=12)
         lines.append(f"Public IP: {r.text[:200]}")
     except Exception as exc:
         lines.append(f"Public IP check: {type(exc).__name__}: {exc}")
 
-    # Independent geo lookup for the same outbound path.
     try:
         r = httpx.get("https://ipapi.co/json/", timeout=12)
         if r.status_code == 200:
@@ -71,8 +69,29 @@ def run_host_diagnostics() -> str:
     except Exception as exc:
         lines.append(f"NVIDIA chat: {type(exc).__name__}: {exc}")
 
-    result = "\n".join(lines)
-    return result[:3900]
+    # v5.2 semantic-memory dependency.
+    try:
+        embedding_model = globals().get("MEMORY_EMBEDDING_MODEL", "baai/bge-m3")
+        r = httpx.post(
+            "https://integrate.api.nvidia.com/v1/embeddings",
+            headers=headers,
+            json={
+                "model": embedding_model,
+                "input": ["проверка памяти"],
+                "encoding_format": "float",
+                "truncate": "END",
+            },
+            timeout=30,
+        )
+        lines.append(f"NVIDIA embeddings ({embedding_model}): HTTP {r.status_code}")
+        if r.status_code != 200:
+            lines.append("embeddings body: " + (r.text or "(empty)")[:1000])
+        else:
+            lines.append("NVIDIA embeddings: OK")
+    except Exception as exc:
+        lines.append(f"NVIDIA embeddings: {type(exc).__name__}: {exc}")
+
+    return "\n".join(lines)[:3900]
 
 
 async def diag_command(
