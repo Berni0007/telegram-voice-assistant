@@ -69,15 +69,18 @@ def run_host_diagnostics() -> str:
     except Exception as exc:
         lines.append(f"NVIDIA chat: {type(exc).__name__}: {exc}")
 
-    # v5.2 semantic-memory dependency.
     try:
-        embedding_model = globals().get("MEMORY_EMBEDDING_MODEL", "baai/bge-m3")
+        embedding_model = globals().get(
+            "MEMORY_EMBEDDING_MODEL",
+            "nvidia/nemotron-3-embed-1b",
+        )
         r = httpx.post(
             "https://integrate.api.nvidia.com/v1/embeddings",
             headers=headers,
             json={
                 "model": embedding_model,
                 "input": ["проверка памяти"],
+                "input_type": "query",
                 "encoding_format": "float",
                 "truncate": "END",
             },
