@@ -5,22 +5,10 @@
 _project_original_process_user_text = process_user_text
 _project_original_schedule_memory_refresh = globals().get("_schedule_memory_refresh")
 
-
+# Keep the generic processor intact. Project switching is intercepted in the
+# text/voice entry handlers below where a real Telegram context is available.
 async def process_user_text(update: Update, text: str, status=None) -> None:
-    if await maybe_handle_project_text(update, globals().get("_active_context", None) or getattr(update, "_context", None), text):
-        if status is not None:
-            try:
-                await status.delete()
-            except Exception:
-                pass
-        return
     return await _project_original_process_user_text(update, text, status=status)
-
-
-# The wrapper above needs the real telegram context. echo_text/voice_message have it,
-# so replace those two thin wrappers instead of relying on private Update attributes.
-_project_original_echo_text = echo_text
-_project_original_voice_message = voice_message
 
 
 async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
