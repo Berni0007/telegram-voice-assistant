@@ -1,4 +1,4 @@
-# Persistent reminders and scheduled Telegram messages.
+# Persistent reminders and scheduled Telegram tasks.
 # Loaded after memory/continuity modules and before Telegram handlers.
 
 from zoneinfo import ZoneInfo
@@ -21,20 +21,40 @@ def _reminder_db() -> sqlite3.Connection:
             run_at TEXT NOT NULL,
             repeat_kind TEXT NOT NULL DEFAULT 'once',
             enabled INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            task_kind TEXT NOT NULL DEFAULT 'reminder'
         )
         """
     )
+    # Migration for databases created before scheduled research tasks existed.
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(reminders)").fetchall()}
+    if "task_kind" not in columns:
+        conn.execute("ALTER TABLE reminders ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'reminder'")
     conn.commit()
     return conn
 
 
-def reminder_add(user_id: int, chat_id: int, text: str, run_at: datetime, repeat_kind: str = "once") -> int:
+def reminder_add(
+    user_id: int,
+    chat_id: int,
+    text: str,
+    run_at: datetime,
+    repeat_kind: str = "once",
+    task_kind: str = "reminder",
+) -> int:
     run_at = run_at.astimezone(REMINDER_TZ)
     with _reminder_db() as conn:
         cur = conn.execute(
-            "INSERT INTO reminders(user_id,chat_id,text,run_at,repeat_kind,enabled,created_at) VALUES(?,?,?,?,?,1,?)",
-            (user_id, chat_id, text.strip(), run_at.isoformat(), repeat_kind, datetime.now(REMINDER_TZ).isoformat()),
+            "INSERT INTO reminders(user_id,chat_id,text,run_at,repeat_kind,enabled,created_at,task_kind) VALUES(?,?,?,?,?,1,?,?)",
+            (
+                user_id,
+                chat_id,
+                text.strip(),
+                run_at.isoformat(),
+                repeat_kind,
+                datetime.now(REMINDER_TZ).isoformat(),
+                task_kind,
+            ),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -79,19 +99,94 @@ def _next_repeat_time(current: datetime, repeat_kind: str) -> datetime | None:
     return None
 
 
+def _looks_like_scheduled_research(text: str) -> bool:
+    low = (text or "").lower()
+    markers = (
+        "найди ", "поищи ", "посмотри ", "проверь ", "собери ",
+        "новости", "сводк", "актуальн", "последн", "свеж",
+        "в интернете", "в сети", "цены", "вакансии", "погоду",
+        "курс ", "расписание", "патч", "релиз", "обновлен", "обновлён",
+    )
+    return any(marker in low for marker in markers)
+
+
+def _scheduled_task_prompt(task_text: str) -> str:
+    text = re.sub(r"\s+", " ", (task_text or "")).strip()
+    if not should_use_web_search(text):
+        text = "Найди в интернете актуальную информацию: " + text
+    return text
+
+
+def generate_scheduled_research(task_text: str) -> str:
+    """Run a fresh web-backed task without adding it to conversation memory."""
+    prompt = _scheduled_task_prompt(task_text)
+    web_context, sources = build_web_context(prompt)
+
+    if not web_context:
+        return (
+            "Не удалось получить свежую информацию из интернета по запланированной задаче. "
+            "Попробую снова при следующем запуске, если задача повторяется."
+        )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                LLM_SYSTEM_PROMPT
+                + "\n\nТы выполняешь запланированную задачу пользователя. "
+                "Сейчас обязательно опирайся на свежие данные из интернет-контекста ниже. "
+                "Сделай готовую полезную выжимку для Telegram: кратко, конкретно, без внутренних рассуждений. "
+                "Если данные противоречат друг другу или чего-то не удалось подтвердить — скажи это прямо.\n\n"
+                + web_context
+            ),
+        },
+        {"role": "user", "content": task_text},
+    ]
+
+    response = llm_client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=messages,
+        temperature=0.35,
+        max_tokens=900,
+        stream=False,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    answer = clean_llm_answer(response.choices[0].message.content or "").strip()
+    if not answer:
+        answer = "Не удалось сформировать результат по запланированной задаче."
+    return append_web_sources(answer, sources)
+
+
 async def _reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     reminder_id = int(context.job.data["reminder_id"])
     item = reminder_get(reminder_id)
     if not item or not item.get("enabled"):
         return
 
+    task_kind = item.get("task_kind", "reminder")
     try:
-        await context.bot.send_message(
-            chat_id=int(item["chat_id"]),
-            text=f"⏰ Напоминание\n{item['text']}",
-        )
-    except Exception:
-        logger.exception("Failed to send reminder id=%s", reminder_id)
+        if task_kind == "research":
+            result = await asyncio.to_thread(generate_scheduled_research, item["text"])
+            message = f"🔎 Запланированная сводка\n\n{result}"
+        else:
+            message = f"⏰ Напоминание\n{item['text']}"
+
+        # Telegram text limit safety.
+        if len(message) <= 4000:
+            await context.bot.send_message(chat_id=int(item["chat_id"]), text=message)
+        else:
+            chunks = [message[i:i + 3900] for i in range(0, len(message), 3900)]
+            for chunk in chunks:
+                await context.bot.send_message(chat_id=int(item["chat_id"]), text=chunk)
+    except Exception as exc:
+        logger.exception("Failed to run scheduled task id=%s", reminder_id)
+        try:
+            await context.bot.send_message(
+                chat_id=int(item["chat_id"]),
+                text=f"⚠️ Не удалось выполнить запланированную задачу #{reminder_id}: {type(exc).__name__}",
+            )
+        except Exception:
+            logger.exception("Failed to report scheduled task error id=%s", reminder_id)
 
     repeat_kind = item.get("repeat_kind", "once")
     current = datetime.fromisoformat(item["run_at"]).astimezone(REMINDER_TZ)
@@ -146,7 +241,6 @@ async def restore_reminders(application) -> None:
 
         if run_at <= now:
             if repeat_kind == "once":
-                # A one-time reminder missed during downtime is delivered shortly after startup.
                 run_at = now + timedelta(seconds=5)
             else:
                 while run_at <= now:
@@ -159,7 +253,7 @@ async def restore_reminders(application) -> None:
         schedule_reminder_job(job_queue, int(item["id"]), run_at)
         restored += 1
 
-    logger.info("Restored reminders: %d", restored)
+    logger.info("Restored reminders/tasks: %d", restored)
 
 
 def _parse_clock(hour: str, minute: str | None) -> tuple[int, int] | None:
@@ -174,10 +268,14 @@ def _parse_clock(hour: str, minute: str | None) -> tuple[int, int] | None:
 
 
 def parse_reminder_request(text: str, now: datetime | None = None) -> dict | None:
-    """Parse common Russian reminder phrases without another LLM call."""
+    """Parse common Russian reminder/task phrases without another LLM call."""
     raw = re.sub(r"\s+", " ", (text or "")).strip()
     low = raw.lower()
-    if not any(x in low for x in ("напомни", "напоминание", "пришли мне", "напиши мне")):
+    scheduling_markers = (
+        "напомни", "напоминание", "пришли мне", "напиши мне",
+        "каждый день", "каждую неделю", "ежедневно", "еженедельно",
+    )
+    if not any(x in low for x in scheduling_markers):
         return None
 
     now = (now or datetime.now(REMINDER_TZ)).astimezone(REMINDER_TZ)
@@ -224,7 +322,6 @@ def parse_reminder_request(text: str, now: datetime | None = None) -> dict | Non
     if run_at is None:
         return None
 
-    # Remove scheduling words from the front/around the sentence to keep the useful reminder text.
     message = raw
     message = re.sub(r"(?i)^\s*(напомни(?:\s+мне)?|напоминание|пришли\s+мне|напиши\s+мне)\s*", "", message).strip(" ,.-")
     message = re.sub(r"(?i)\bчерез\s+\d+\s*(?:минут\w*|час\w*|дн\w*)\b", "", message)
@@ -235,7 +332,8 @@ def parse_reminder_request(text: str, now: datetime | None = None) -> dict | Non
     if not message:
         message = "Напоминание"
 
-    return {"run_at": run_at, "repeat_kind": repeat_kind, "text": message}
+    task_kind = "research" if _looks_like_scheduled_research(message) else "reminder"
+    return {"run_at": run_at, "repeat_kind": repeat_kind, "text": message, "task_kind": task_kind}
 
 
 def reminder_human_time(dt: datetime) -> str:
@@ -247,13 +345,14 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     rows = reminder_list(update.effective_user.id)
     if not rows:
-        await update.message.reply_text("Активных напоминаний нет.")
+        await update.message.reply_text("Активных напоминаний и задач нет.")
         return
-    lines = ["⏰ Активные напоминания:"]
+    lines = ["⏰ Активные напоминания и задачи:"]
     repeat_names = {"once": "один раз", "daily": "каждый день", "weekly": "каждую неделю"}
     for item in rows[:30]:
         dt = datetime.fromisoformat(item["run_at"])
-        lines.append(f"#{item['id']} — {reminder_human_time(dt)} ({repeat_names.get(item['repeat_kind'], item['repeat_kind'])}) — {item['text']}")
+        kind = "🔎 поиск" if item.get("task_kind") == "research" else "⏰ напоминание"
+        lines.append(f"#{item['id']} — {kind} — {reminder_human_time(dt)} ({repeat_names.get(item['repeat_kind'], item['repeat_kind'])}) — {item['text']}")
     lines.append("\nУдалить: /delreminder ID")
     await update.message.reply_text("\n".join(lines))
 
@@ -266,12 +365,12 @@ async def delete_reminder_command(update: Update, context: ContextTypes.DEFAULT_
         return
     reminder_id = int(context.args[0])
     if not reminder_disable(reminder_id, update.effective_user.id):
-        await update.message.reply_text("Такого активного напоминания нет.")
+        await update.message.reply_text("Такого активного напоминания/задания нет.")
         return
     if context.job_queue:
         for job in context.job_queue.get_jobs_by_name(f"reminder:{reminder_id}"):
             job.schedule_removal()
-    await update.message.reply_text(f"Напоминание #{reminder_id} удалено.")
+    await update.message.reply_text(f"Задача #{reminder_id} удалена.")
 
 
 async def maybe_handle_reminder_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -287,10 +386,12 @@ async def maybe_handle_reminder_text(update: Update, context: ContextTypes.DEFAU
         parsed["text"],
         parsed["run_at"],
         parsed["repeat_kind"],
+        parsed["task_kind"],
     )
     schedule_reminder_job(context.job_queue, reminder_id, parsed["run_at"])
     repeat_names = {"once": "", "daily": " · каждый день", "weekly": " · каждую неделю"}
+    kind_line = "🔎 Выполню интернет-поиск и пришлю готовую сводку." if parsed["task_kind"] == "research" else "⏰ Пришлю это сообщение как напоминание."
     await update.message.reply_text(
-        f"⏰ Готово. #{reminder_id}\n{reminder_human_time(parsed['run_at'])}{repeat_names.get(parsed['repeat_kind'], '')}\n{parsed['text']}"
+        f"Готово. #{reminder_id}\n{reminder_human_time(parsed['run_at'])}{repeat_names.get(parsed['repeat_kind'], '')}\n{kind_line}\n{parsed['text']}"
     )
     return True
