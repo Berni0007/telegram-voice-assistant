@@ -7,13 +7,20 @@ _watch_original_echo_text = echo_text
 async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
-    if await maybe_handle_watch_text(update, context, update.message.text):
+
+    text = update.message.text
+
+    # Natural watch management has priority over watch creation and ordinary chat.
+    if await maybe_handle_watch_management_text(update, context, text):
         return
+    if await maybe_handle_watch_text(update, context, text):
+        return
+
     await _watch_original_echo_text(update, context)
 
 
 async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Voice -> ASR -> watch/project/reminder routing -> auto project -> assistant."""
+    """Voice -> ASR -> watch management/create -> project/reminder -> auto project -> assistant."""
     if not update.message or not update.message.voice or not update.effective_user:
         return
 
@@ -25,6 +32,14 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             telegram_file = await context.bot.get_file(voice.file_id)
             await telegram_file.download_to_drive(custom_path=str(voice_path))
             transcript = await asyncio.to_thread(transcribe_voice_file, voice_path)
+
+        # Listing/removing watches is handled naturally, without slash commands.
+        if await maybe_handle_watch_management_text(update, context, transcript):
+            try:
+                await status.delete()
+            except Exception:
+                pass
+            return
 
         if parse_watch_request(transcript):
             try:
