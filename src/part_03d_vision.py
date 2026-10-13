@@ -4,9 +4,49 @@
 import base64
 
 VISION_ENABLED = os.getenv("VISION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-VISION_MODEL = os.getenv("VISION_MODEL", "google/gemma-3n-e4b-it").strip() or "google/gemma-3n-e4b-it"
 VISION_MAX_BYTES = max(256_000, int(os.getenv("VISION_MAX_BYTES", "3500000")))
 VISION_MAX_TOKENS = max(300, int(os.getenv("VISION_MAX_TOKENS", "1100")))
+
+# NVIDIA retires hosted models periodically. Keep a small ordered fallback chain so
+# screenshot analysis survives a single model reaching EOL or becoming unavailable.
+_VISION_DEFAULT_MODELS = (
+    "qwen/qwen3.5-122b-a10b",
+    "stepfun-ai/step-3.7-flash",
+    "deepseek-ai/deepseek-v4.1-flash",
+)
+_VISION_EOL_MODELS = {
+    "google/gemma-3n-e4b-it",  # NVIDIA endpoint EOL 2026-07-27
+}
+
+
+def _vision_model_candidates() -> list[str]:
+    candidates: list[str] = []
+
+    # Backwards-compatible single-model override. Known retired models are skipped
+    # instead of causing one guaranteed failing API call for every image.
+    legacy = os.getenv("VISION_MODEL", "").strip()
+    if legacy and legacy not in _VISION_EOL_MODELS:
+        candidates.append(legacy)
+
+    configured = os.getenv("VISION_MODELS", "").strip()
+    if configured:
+        candidates.extend(x.strip() for x in configured.split(",") if x.strip())
+    else:
+        candidates.extend(_VISION_DEFAULT_MODELS)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for model in candidates:
+        if not model or model in _VISION_EOL_MODELS or model in seen:
+            continue
+        seen.add(model)
+        result.append(model)
+
+    return result or list(_VISION_DEFAULT_MODELS)
+
+
+# Kept for logging/backwards compatibility with the rest of the bot.
+VISION_MODEL = _vision_model_candidates()[0]
 
 
 def _vision_project_context(user_id: int) -> str:
@@ -25,6 +65,12 @@ def _vision_project_context(user_id: int) -> str:
         "Учитывай его только если он действительно связан с изображением."
         + (f"\nКраткий контекст проекта: {summary}" if summary else "")
     )
+
+
+def _vision_temperature(model: str) -> float:
+    # DeepSeek's hosted reference recommends temperature=1.0; the others work well
+    # with a lower value for deterministic screenshot troubleshooting.
+    return 1.0 if "deepseek" in model.lower() else 0.25
 
 
 def analyze_image_bytes(user_id: int, image_bytes: bytes, user_prompt: str = "", mime_type: str = "image/jpeg") -> str:
@@ -58,22 +104,39 @@ def analyze_image_bytes(user_id: int, image_bytes: bytes, user_prompt: str = "",
         + f"\n\nЗапрос пользователя: {question}"
     )
 
-    response = llm_client.chat.completions.create(
-        model=VISION_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": instruction},
-                    {"type": "image_url", "image_url": {"url": data_url}},
+    errors: list[str] = []
+    for model in _vision_model_candidates():
+        try:
+            response = llm_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": instruction},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    }
                 ],
-            }
-        ],
-        temperature=0.25,
-        max_tokens=VISION_MAX_TOKENS,
-        stream=False,
-    )
-    answer = clean_llm_answer(response.choices[0].message.content or "").strip()
-    if not answer:
-        raise RuntimeError("Vision model returned an empty response.")
-    return answer
+                temperature=_vision_temperature(model),
+                max_tokens=VISION_MAX_TOKENS,
+                stream=False,
+            )
+            answer = clean_llm_answer(response.choices[0].message.content or "").strip()
+            if answer:
+                if model != VISION_MODEL:
+                    logger.info("Vision fallback succeeded with model=%s", model)
+                return answer
+            errors.append(f"{model}: пустой ответ")
+            logger.warning("Vision model returned empty response: model=%s", model)
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            errors.append(f"{model}: {status or type(exc).__name__}")
+            logger.warning(
+                "Vision model failed; trying fallback: model=%s status=%s error=%s",
+                model,
+                status,
+                str(exc)[:500],
+            )
+
+    raise RuntimeError("Все доступные vision-модели NVIDIA не ответили: " + "; ".join(errors))
