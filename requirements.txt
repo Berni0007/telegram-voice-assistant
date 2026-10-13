@@ -1,4 +1,4 @@
-python-telegram-bot>=21,<23
+python-telegram-bot[job-queue]>=21,<23
 python-dotenv>=1,<2
 nvidia-riva-client
 grpcio
