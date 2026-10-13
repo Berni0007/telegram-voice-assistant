@@ -15,6 +15,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("diag", diag_command))
     app.add_handler(CommandHandler("reminders", reminders_command))
     app.add_handler(CommandHandler("delreminder", delete_reminder_command))
+    app.add_handler(CommandHandler("projects", projects_command))
+    app.add_handler(CommandHandler("project", project_command))
+    app.add_handler(CommandHandler("projectinfo", project_info_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(
         MessageHandler(filters.VOICE, voice_message)
