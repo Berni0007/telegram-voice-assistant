@@ -1,6 +1,8 @@
 # Automatic project selection with a small remote classifier call.
 # No local ML model is loaded on the host.
 
+import json
+
 AUTO_PROJECT_ENABLED = os.getenv("AUTO_PROJECT_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 AUTO_PROJECT_MODEL = os.getenv("AUTO_PROJECT_MODEL", LLM_MODEL).strip() or LLM_MODEL
 AUTO_PROJECT_MIN_CONFIDENCE = min(0.99, max(0.50, float(os.getenv("AUTO_PROJECT_MIN_CONFIDENCE", "0.84"))))
