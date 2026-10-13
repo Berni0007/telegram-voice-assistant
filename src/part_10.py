@@ -20,6 +20,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("projectinfo", project_info_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(
+        MessageHandler(filters.PHOTO, photo_message)
+    )
+    app.add_handler(
         MessageHandler(filters.VOICE, voice_message)
     )
     app.add_handler(
@@ -27,13 +30,15 @@ if __name__ == "__main__":
     )
 
     logger.info(
-        "Starting bot: llm=%s asr=%s/%s tts=%s/%s voice=%s reminders_tz=%s",
+        "Starting bot: llm=%s vision=%s asr=%s/%s tts=%s/%s voice=%s reminders_tz=%s auto_project=%s",
         LLM_MODEL,
+        VISION_MODEL,
         NVIDIA_ASR_SERVER,
         ASR_LANGUAGE,
         NVIDIA_TTS_SERVER,
         TTS_LANGUAGE,
         TTS_VOICE or "<auto>",
         REMINDER_TIMEZONE,
+        AUTO_PROJECT_ENABLED,
     )
     app.run_polling()
